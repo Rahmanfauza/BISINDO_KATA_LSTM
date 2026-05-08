@@ -1,0 +1,10 @@
+# Virtual Environment
+.venv311/
+
+# VSCode
+.vscode/
+
+# History
+.history/
+
+.Logs/

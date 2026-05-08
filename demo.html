@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Demo Klasifikasi Bahasa Isyarat AI (LSTM + MediaPipe)</title>
+
+    <!-- Pustaka TensorFlow.js -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs" crossorigin="anonymous"></script>
+
+    <!-- Pustaka MediaPipe Holistic dan Camera -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            background-color: #121212;
+            color: #ffffff;
+            padding: 20px;
+            margin: 0;
+        }
+
+        .container {
+            position: relative;
+            display: inline-block;
+            margin-top: 20px;
+        }
+
+        video {
+            display: none;
+        }
+
+        /* Hanya butuh canvas untuk visual HD */
+        canvas {
+            background-color: #222;
+            border: 4px solid #333;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+        }
+
+        .output-box {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px 25px;
+            border-radius: 10px;
+            border: 1px solid #444;
+            font-size: 28px;
+            font-weight: bold;
+            text-align: left;
+        }
+
+        .status {
+            margin-bottom: 20px;
+            font-size: 18px;
+            color: #ffcc00;
+        }
+
+        #startBtn {
+            padding: 12px 30px;
+            font-size: 20px;
+            cursor: pointer;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-weight: bold;
+            transition: 0.3s;
+        }
+
+        #startBtn:hover {
+            background: #218838;
+        }
+
+        #startBtn:disabled {
+            background: #555;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>Web Demo Deteksi Sign Language</h1>
+    <p class="status" id="statusHeader">Sedang mengunduh dan memuat model AI (~beberapa detik)...</p>
+    <button id="startBtn" disabled>Nyalakan Kamera & Deteksi!</button>
+
+    <div class="container">
+        <!-- Kamera asli disembunyikan, dirender ulang di Canvas -->
+        <video id="videoElement" width="640" height="480" autoplay playsinline></video>
+        <canvas id="canvasElement" width="640" height="480"></canvas>
+
+        <!-- UI Deteksi -->
+        <div class="output-box">
+            Kata: <span id="detectedAction" style="color: #00ff00;">-</span><br>
+            Akurasi: <span id="confidence" style="font-size: 20px; color: #aaa;">0%</span>
+        </div>
+    </div>
+
+    <script>
+        // ==========================================
+        //  KONFIGURASI AI (SESUAIKAN DENGAN PYTHON)
+        // ==========================================
+        // PERHATIAN: Array ini HARUS SAMA PERSIS urutannya saat Anda melatih model.
+        // Cek output training Python Anda, biasanya alfabetikal folder: ['apa kabar', 'hallo', 'idle', 'makan']
+        const ACTIONS = ['makan', 'idle', 'hallo'];
+        const SEQUENCE_LENGTH = 30; // Butuh 30 frame
+        const THRESHOLD = 0.6; // Muncul kalau yakin 60%
+
+        let model = null;
+        let sequence = [];
+
+        // DOM Elements
+        const videoElement = document.getElementById('videoElement');
+        const canvasElement = document.getElementById('canvasElement');
+        const canvasCtx = canvasElement.getContext('2d');
+        const statusHeader = document.getElementById('statusHeader');
+        const detectedActionText = document.getElementById('detectedAction');
+        const confidenceText = document.getElementById('confidence');
+        const startBtn = document.getElementById('startBtn');
+
+        // 1. Fungsi Memuat Model TensorFlow.js
+        async function loadAI() {
+            try {
+                // Di Laravel nanti, pastikan URL mengarah ke public/tfjs_model/model.json
+                model = await tf.loadLayersModel('./tfjs_model/model.json');
+                statusHeader.innerText = "[✔] Model 'model.json' siap dan berjalan!";
+                statusHeader.style.color = "#00ff00";
+                startBtn.disabled = false;
+            } catch (err) {
+                statusHeader.innerText = "[X] Gagal memuat model. Pastikan Anda menjalankan localhost/server agar file .json bisa terbaca.";
+                statusHeader.style.color = "#ff0000";
+                console.error(err);
+            }
+        }
+
+        // 2. Fungsi Ekstrak Landmark -> Array 258 Angka (Sama dengan Python)
+        function extractKeypoints(results) {
+            let pose = new Array(33 * 4).fill(0);
+            if (results.poseLandmarks) {
+                results.poseLandmarks.forEach((res, i) => {
+                    pose[i * 4] = res.x;
+                    pose[i * 4 + 1] = res.y;
+                    pose[i * 4 + 2] = res.z;
+                    pose[i * 4 + 3] = res.visibility !== undefined ? res.visibility : 0;
+                });
+            }
+
+            let lh = new Array(21 * 3).fill(0);
+            if (results.leftHandLandmarks) {
+                results.leftHandLandmarks.forEach((res, i) => {
+                    lh[i * 3] = res.x;
+                    lh[i * 3 + 1] = res.y;
+                    lh[i * 3 + 2] = res.z;
+                });
+            }
+
+            let rh = new Array(21 * 3).fill(0);
+            if (results.rightHandLandmarks) {
+                results.rightHandLandmarks.forEach((res, i) => {
+                    rh[i * 3] = res.x;
+                    rh[i * 3 + 1] = res.y;
+                    rh[i * 3 + 2] = res.z;
+                });
+            }
+
+            // Gabung (Array concat)
+            return [...pose, ...lh, ...rh];
+        }
+
+        // 3. Listener Setiap Frame MediaPipe Tiba
+        async function onResults(results) {
+            // Bersihkan frame lama, gambar frame webcame baru
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            // Gambar Skeleton (hanya Pose & Tangan)
+            if (results.poseLandmarks) {
+                drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, { color: '#FFFFFF', lineWidth: 2 });
+                drawLandmarks(canvasCtx, results.poseLandmarks, { color: '#FF0000', lineWidth: 1, radius: 2 });
+            }
+            if (results.leftHandLandmarks) {
+                drawConnectors(canvasCtx, results.leftHandLandmarks, HAND_CONNECTIONS, { color: '#CC0000', lineWidth: 2 });
+            }
+            if (results.rightHandLandmarks) {
+                drawConnectors(canvasCtx, results.rightHandLandmarks, HAND_CONNECTIONS, { color: '#00CC00', lineWidth: 2 });
+            }
+            canvasCtx.restore();
+
+            // Ekstrak Titik Array untuk Neural Network
+            const keypoints = extractKeypoints(results);
+            sequence.push(keypoints);
+
+            // Limit antrian 30 frame
+            if (sequence.length > SEQUENCE_LENGTH) {
+                sequence.shift();
+            }
+
+            // Mulai Prediksi AI jika sudah kumpul 30 Frame
+            if (sequence.length === SEQUENCE_LENGTH && model !== null) {
+
+                // Ubah data mentah array javascript menjadi Tensor 3D (Batch 1, 30 Frame, 258 Fitur)
+                const inputTensor = tf.tensor([sequence]);
+
+                // Prediksi secara asinkron
+                const prediction = model.predict(inputTensor);
+                const probArray = await prediction.data();
+
+                // Bersihkan sampah RAM tensor
+                inputTensor.dispose();
+                prediction.dispose();
+
+                // Cari Probability tertinggi
+                let maxProb = 0;
+                let classIdx = 0;
+                for (let i = 0; i < probArray.length; i++) {
+                    if (probArray[i] > maxProb) {
+                        maxProb = probArray[i];
+                        classIdx = i;
+                    }
+                }
+
+                // Ubah Layar Teks
+                if (maxProb > THRESHOLD) {
+                    let word = ACTIONS[classIdx] || `Unknown[${classIdx}]`;
+                    detectedActionText.innerText = word;
+                    confidenceText.innerText = (maxProb * 100).toFixed(1) + "%";
+                }
+            }
+        }
+
+        // 4. Seting Mesin MediaPipe
+        const holistic = new Holistic({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`;
+            }
+        });
+
+        holistic.setOptions({
+            modelComplexity: 1, // Kualitas medium, sangat stabil di web
+            smoothLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5,
+            selfieMode: true // Menambahkan efek cermin untuk menyesuaikan dengan Python cv2.flip
+        });
+
+        holistic.onResults(onResults);
+
+        // 5. Tombol Pemicu Start
+        startBtn.addEventListener('click', () => {
+            statusHeader.innerText = "Kamera Menyala, Silakan mulai isyaratnya!";
+            startBtn.style.display = "none";
+
+            const camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    await holistic.send({ image: videoElement });
+                },
+                width: 640,
+                height: 480
+            });
+            camera.start();
+        });
+
+        // Jalankan pemuatan model saat web digenerate
+        loadAI();
+
+    </script>
+</body>
+
+</html>
